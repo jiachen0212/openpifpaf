@@ -1,5 +1,5 @@
-export PATH="/home/chenjia/anaconda3/envs/py36torch0.4/bin:$PATH"
-export PYTHONPATH="/home/chenjia/anaconda3/envs/py36torch0.4/lib/python3.6/site-packages/:$PYTHONPATH"
+export PATH="/home..../envs/py36torch0.4/bin:$PATH"
+export PYTHONPATH="/home/...../envs/py36torch0.4/lib/python3.6/site-packages/:$PYTHONPATH"
 
 
 python gt_vision.py
