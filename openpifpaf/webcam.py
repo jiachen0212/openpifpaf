@@ -9,61 +9,48 @@ Example command:
         --connection-method=max
 """
 
-
+import numpy as np
 import argparse
 import time
+import matplotlib
+from collections import Counter  
 
 import matplotlib.pyplot as plt
 import torch
 
-import cv2  # pylint: disable=import-error
+import cv2
 from .network import nets
 from . import decoder, show, transforms
 
+COCO_PERSON_SKELETON = [
+    [16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13],
+    [6, 7], [6, 8], [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3],
+    [2, 4], [3, 5], [4, 6], [5, 7]]
 
-class Visualizer(object):
-    def __init__(self, processor, args):
-        self.processor = processor
-        self.args = args
 
-    def __call__(self, first_image, fig_width=4.0, **kwargs):
-        if 'figsize' not in kwargs:
-            kwargs['figsize'] = (fig_width, fig_width * first_image.shape[0] / first_image.shape[1])
-
-        fig = plt.figure(**kwargs)
-        ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
-        ax.set_axis_off()
-        ax.set_xlim(0, first_image.shape[1])
-        ax.set_ylim(first_image.shape[0], 0)
-        text = 'OpenPifPaf'
-        ax.text(1, 1, text,
-                fontsize=10, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.5, linewidth=0))
-        fig.add_axes(ax)
-        mpl_im = ax.imshow(first_image)
-        fig.show()
-
-        # visualizer
-        if self.args.colored_connections:
-            viz = show.KeypointPainter(show_box=False, color_connections=True,
-                                       markersize=1, linewidth=6)
-        else:
-            viz = show.KeypointPainter(show_box=False)
-
-        while True:
-            image, all_fields = yield
-            keypoint_sets, _ = self.processor.keypoint_sets(all_fields)
-
-            draw_start = time.time()
-            while ax.lines:
-                del ax.lines[0]
-            mpl_im.set_data(image)
-            viz.keypoints(ax, keypoint_sets)
-            fig.canvas.draw()
-            print('draw', time.time() - draw_start)
-            plt.pause(0.01)
-
-        plt.close(fig)
+def plot_points(img, labels, skeleton):
+    nums, kth = labels.shape[:2]
+    for i in range(nums):
+        # r = np.random.randint(0, 255)  # 可以考虑自己随机颜色
+        # g = np.random.randint(0, 255)
+        # b = np.random.randint(0, 255)
+        # color = (r, g, b)
+        point_color = (255, 255, 255)   # 白点
+        line_color = (0, 0, 255)  # 红线
+        label = labels[i, :, :]
+        x = []
+        for j in range(kth):
+            if label[j][-1] >= 0.7:
+                x.append((label[j][0], label[j][1], j+1))   # j+1代表这个点的index, 后续点连线用到
+        point_size =1
+        thickness = 1
+        for point in x:
+            cv2.circle(img, (int(point[0]), int(point[1])), point_size, point_color, thickness)
+        for connecte in skeleton:
+            for p1 in x:
+                for p2 in x:
+                    if p1[-1] == connecte[0] and p2[-1] == connecte[1]:
+                        cv2.line(img, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), line_color, 1)
 
 
 def main():
@@ -72,11 +59,11 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     nets.cli(parser)
-    decoder.cli(parser, force_complete_pose=False, instance_threshold=0.05)
+    decoder.cli(parser, force_complete_pose=False, instance_threshold=0.1, seed_threshold=0.5)
     parser.add_argument('--no-colored-connections',
                         dest='colored_connections', default=True, action='store_false',
                         help='do not use colored connections to draw poses')
-    parser.add_argument('--disable-cuda', action='store_true',
+    parser.add_argument('--disable_cuda', action='store_true',
                         help='disable CUDA')
     parser.add_argument('--source', default=0,
                         help='OpenCV source url. Integer for webcams. Or ipwebcam streams.')
@@ -84,45 +71,59 @@ def main():
                         help='input image scale factor')
     args = parser.parse_args()
 
-    # check whether source should be an int
-    if len(args.source) == 1:
-        args.source = int(args.source)
 
     # add args.device
     args.device = torch.device('cpu')
     if not args.disable_cuda and torch.cuda.is_available():
+        print('using gpu ...')
         args.device = torch.device('cuda')
 
     # load model
     model, _ = nets.factory_from_args(args)
     model = model.to(args.device)
     processor = decoder.factory_from_args(args, model)
+    
+    # args.source: 'name1.avi, name2.avi,...'
+    avis = []
+    counts = Counter(args.source)
+    vid_nums = counts[',']  # douhao numbers
+    if vid_nums == 0:
+        avis = [args.source]
+    else:
+        for i in range(vid_nums):
+            avis.append(args.source.split(',')[i])
+        avis.append(args.source.split(',')[-1])
+    for vid_id, avi in enumerate(avis):
+        print('************* runing the ', avi, 'video *************')
+        # name = np.random.randint(1,100)
+        videoCapture = cv2.VideoCapture(avi)   # 待检测的video
+        fps = videoCapture.get(cv2.CAP_PROP_FPS)
+        size = (int(videoCapture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(videoCapture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
-    last_loop = time.time()
-    capture = cv2.VideoCapture(args.source)
+        scale = True  # 是否scale视频帧的尺寸
+        if scale:
+            size = (683, 384)
 
-    visualizer = None
-    while True:
-        _, image_original = capture.read()
-        image = cv2.resize(image_original, None, fx=args.scale, fy=args.scale)
-        print('resized image size: {}'.format(image.shape))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        ret, frame = videoCapture.read()
+        print('whether scale?', scale)
+        videoWriter = cv2.VideoWriter('show' + str(vid_id) + '.avi', cv2.VideoWriter_fourcc(*'MJPG'), fps, size)
+        frame_cnt = 0
+        while ret:
+            frame1 = cv2.resize(frame, size)  # (384, 683, 3)
+            image = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
+            processed_image_cpu = transforms.image_transform(image.copy())   # normalize
+            processed_image = processed_image_cpu.contiguous().to(args.device, non_blocking=True)  # transpose 2,0,1
+            fields = processor.fields(torch.unsqueeze(processed_image, 0))[0]
+            keypoint_sets, _ = processor.keypoint_sets(fields)
 
-        if visualizer is None:
-            visualizer = Visualizer(processor, args)(image)
-            visualizer.send(None)
+            if keypoint_sets.shape[0] > 0:
+                plot_points(image, keypoint_sets, COCO_PERSON_SKELETON)
 
-        start = time.time()
-        processed_image_cpu = transforms.image_transform(image.copy())
-        processed_image = processed_image_cpu.contiguous().to(args.device, non_blocking=True)
-        print('preprocessing time', time.time() - start)
-
-        fields = processor.fields(torch.unsqueeze(processed_image, 0))[0]
-        visualizer.send((image, fields))
-
-        print('loop time = {:.3}s, FPS = {:.3}'.format(
-            time.time() - last_loop, 1.0 / (time.time() - last_loop)))
-        last_loop = time.time()
+            videoWriter.write(image)
+            frame_cnt += 1
+            print('帧数: ', frame_cnt)
+            ret, frame = videoCapture.read()
 
 
 if __name__ == '__main__':
